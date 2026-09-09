@@ -905,6 +905,9 @@ _VOLUME_SPEC = {
     "choices": None, "initial": None,
 }
 
+# Same shape, but the entries are WEIGHTS: never downloaded, named in the run.
+_MODEL_SPEC = dict(_VOLUME_SPEC, server_selectable="model")
+
 
 class AcceptsVolumeTest(unittest.TestCase):
     """Which file arguments may be satisfied by a volume open in the scene:
@@ -985,29 +988,169 @@ class InputSourcesTest(unittest.TestCase):
             {"name": "MG_test_scan.nii.gz", "kind": "file", "size": 94 * 1024 * 1024},
         ])
         self.widget.setVolumeChoices(["CBCT_patient1", "CBCT_patient2"])
+        # Real files on disk: the caption reports a size, and a stub size would
+        # test the stub.
+        self.temp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.temp, True)
 
-    def test_the_whole_row_is_one_line(self):
-        layout = self.widget.container.layout
-        self.assertIsInstance(layout, qt.QHBoxLayout)
-        self.assertIs(layout.widgets[0], self.widget.combo)
+    def test_the_controls_are_one_line_with_the_caption_under_them(self):
+        """Two lines, and only two: the controls, then what they hold.
+
+        The controls stayed on one line -- that was the point of the row and
+        still is. The caption is a line of its own because it is the only place
+        that can name the file and its kind without eliding one of them.
+        """
+        column = self.widget.container.layout
+        self.assertIsInstance(column, qt.QVBoxLayout)
+        controls, caption = column.widgets
+        self.assertIs(caption, self.widget.caption)
+        self.assertIsInstance(controls.layout, qt.QHBoxLayout)
+        self.assertIs(controls.layout.widgets[0], self.widget.combo)
+
+    def test_the_caption_is_hidden_until_there_is_something_to_say(self):
+        self.assertFalse(self.widget.caption.isVisible())
+        self.assertEqual(self.widget.caption.text, "")
+
+    def test_a_downloaded_test_file_says_its_name_and_its_kind(self):
+        """The complaint this exists for: the row showed
+        `:TestFiles2026-09-09_09+26+53.117/MG_test_scan.nii.gz` and the dropdown
+        had gone back to its prompt, so nothing on screen said which file was
+        loaded, still less that it was a NIfTI volume."""
+        path = os.path.join(self.temp, "MG_test_scan.nii.gz")
+        with open(path, "wb") as handle:
+            handle.write(b"x" * 2048)
+
+        formgen.set_local_path(self.widget, path)
+
+        caption = self.widget.caption.text
+        self.assertIn("MG_test_scan.nii.gz", caption)
+        self.assertIn("NIfTI volume", caption)
+        self.assertIn("2.0 KB", caption)
+        self.assertTrue(self.widget.caption.isVisible())
+
+    def test_it_says_a_fetched_file_is_not_the_user_s_own_copy(self):
+        """A download lands in a session folder swept on exit. A user who takes
+        it for their own copy will look for it next week and not find it."""
+        path = os.path.join(self.temp, "MG_test_scan.nii.gz")
+        open(path, "wb").close()
+
+        formgen.set_local_path(self.widget, path)
+
+        self.assertIn("test data", self.widget.caption.text)
+
+    def test_a_file_the_user_chose_themselves_claims_nothing_of_the_sort(self):
+        path = os.path.join(self.temp, "my_own_patient.nii.gz")
+        open(path, "wb").close()
+
+        formgen.set_local_path(self.widget, path)
+
+        self.assertIn("my_own_patient.nii.gz", self.widget.caption.text)
+        self.assertNotIn("test data", self.widget.caption.text)
+
+    def test_a_surface_reads_as_a_surface(self):
+        path = os.path.join(self.temp, "T1_01_U_segmented.vtk")
+        open(path, "wb").close()
+
+        formgen.set_local_path(self.widget, path)
+
+        self.assertIn("VTK surface", self.widget.caption.text)
+
+    def test_a_name_that_says_nothing_is_not_given_a_kind(self):
+        """Better a bare name than a confident guess at what it holds."""
+        path = os.path.join(self.temp, "measurements.weird")
+        open(path, "wb").close()
+
+        formgen.set_local_path(self.widget, path)
+
+        self.assertIn("measurements.weird", self.widget.caption.text)
+        self.assertNotIn(" - ", self.widget.caption.text.replace(
+            "measurements.weird", ""))
+
+    def test_the_full_path_stays_reachable_as_a_tooltip(self):
+        """The caption names the file; the tooltip says where it sits. Neither
+        costs a line the panel does not have."""
+        path = os.path.join(self.temp, "MG_test_scan.nii.gz")
+        open(path, "wb").close()
+
+        formgen.set_local_path(self.widget, path)
+
+        self.assertEqual(self.widget.local.pathEdit.toolTip(), path)
+
+    def test_an_open_volume_says_it_is_one(self):
+        """Nothing is on disk for it, so `describe_file` has nothing to read --
+        and "no file chosen" would be a lie about a satisfied argument."""
+        self.widget.combo.setCurrentIndex(2)
+
+        self.assertIn("Open volume", self.widget.caption.text)
+        self.assertIn("CBCT_patient1", self.widget.caption.text)
+
+    def test_the_caption_empties_when_the_input_does(self):
+        path = os.path.join(self.temp, "MG_test_scan.nii.gz")
+        open(path, "wb").close()
+        formgen.set_local_path(self.widget, path)
+
+        formgen.set_local_path(self.widget, "")
+
+        self.assertEqual(self.widget.caption.text, "")
+        self.assertFalse(self.widget.caption.isVisible())
 
     def test_entries_are_the_prompt_then_test_files_then_volumes(self):
         combo = self.widget.combo
         self.assertEqual(
             [combo.itemText(i) for i in range(combo.count)],
             [
-                formgen.ServerFileInput.CHOOSE_OPTION,
+                formgen.ServerFileInput.PROMPT_BOTH,
                 "MG_test_scan.nii.gz  (file, 94 MB)",
                 formgen.OPEN_VOLUME_PREFIX + "CBCT_patient1",
                 formgen.OPEN_VOLUME_PREFIX + "CBCT_patient2",
             ],
         )
 
-    def test_the_prompt_is_the_path_fields_own_words(self):
-        """One affordance, one prompt: the dropdown's first entry and the empty
-        path field say the same thing, because they mean the same thing."""
-        self.assertEqual(formgen.ServerFileInput.CHOOSE_OPTION, formgen.PATH_PLACEHOLDER)
-        self.assertEqual(self.widget.local.pathEdit.placeholderText, formgen.PATH_PLACEHOLDER)
+    def test_the_prompt_names_what_the_list_holds(self):
+        """It used to be the path field's own placeholder, word for word.
+
+        Photographed, the panel showed "Select a file or a folder" twice side by
+        side, and the dropdown read as a duplicate of the field beside it rather
+        than as the one place a tool's test data is reached from. Nobody opens a
+        control that appears to repeat its neighbour.
+        """
+        self.assertEqual(self.widget.combo.itemText(0),
+                         formgen.ServerFileInput.PROMPT_BOTH)
+        self.assertNotEqual(self.widget.combo.itemText(0),
+                            self.widget.local.pathEdit.placeholderText)
+
+    def test_the_prompt_offers_only_what_is_there(self):
+        """Naming a source the list does not have would be worse than saying
+        nothing: a user opens it, finds no test data, and stops trusting it."""
+        self.widget.setVolumeChoices([])
+        self.assertEqual(self.widget.combo.itemText(0),
+                         formgen.ServerFileInput.PROMPT_HOSTED)
+
+        self.widget.setChoices([])
+        self.widget.setVolumeChoices(["CBCT_patient1"])
+        self.assertEqual(self.widget.combo.itemText(0),
+                         formgen.ServerFileInput.PROMPT_VOLUMES)
+
+    def test_an_empty_list_keeps_the_neutral_words(self):
+        self.widget.setChoices([])
+        self.widget.setVolumeChoices([])
+        self.assertEqual(self.widget.combo.itemText(0),
+                         formgen.ServerFileInput.CHOOSE_OPTION)
+
+    def test_a_model_row_says_model_because_nothing_is_fetched(self):
+        """Those entries are not test data: they are the value that travels,
+        and the weights never leave the server."""
+        widget = formgen.file_widget(_MODEL_SPEC, "single_file")
+        widget.setChoices([{"name": "AMASSS_Models", "kind": "folder", "size": None}])
+
+        self.assertEqual(widget.combo.itemText(0),
+                         formgen.ServerFileInput.PROMPT_MODEL)
+
+    def test_the_prompt_is_also_the_collapsed_box_tooltip(self):
+        """The box stays narrow on purpose, so the prompt is the first thing
+        elided -- the tooltip is where it survives."""
+        self.assertEqual(self.widget.combo.toolTip(),
+                         formgen.ServerFileInput.PROMPT_BOTH)
 
     def test_the_default_state_names_nothing(self):
         self.assertEqual(self.widget.hosted_name(), "")
@@ -1085,7 +1228,9 @@ class InputSourcesTest(unittest.TestCase):
         self.widget.setVolumeChoices([])
 
         self.assertEqual(self.widget.volume_name(), "")
-        self.assertEqual(self.widget.combo.currentText, formgen.ServerFileInput.CHOOSE_OPTION)
+        # The prompt follows what is left in the list: the test files.
+        self.assertEqual(self.widget.combo.currentText,
+                         formgen.ServerFileInput.PROMPT_HOSTED)
 
     def test_a_refresh_starts_no_download_of_its_own(self):
         """clear()+addItems reselects index 0 and would otherwise fire the

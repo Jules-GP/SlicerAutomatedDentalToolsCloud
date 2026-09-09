@@ -1001,6 +1001,66 @@ a caller has to hide *together*. An out-parameter rather than a second return
 value because the labels are created inside `build()` and a QFormLayout's label
 for a field cannot be recovered reliably across PythonQt versions.
 
+### The dropdown says what is inside it
+
+Its first entry used to be the path field's own placeholder, word for word, on
+the reasoning that two halves of one row should say one thing. Photographed, the
+panel showed **"Select a file or a folder" twice, side by side** — and the
+dropdown read as a duplicate of the field beside it rather than as the one place
+a tool's test data is reached from. Nobody opens a control that appears to repeat
+its neighbour.
+
+The prompt now names what the list holds, and only what is actually in it:
+
+| the list holds | it says |
+|---|---|
+| test files and open volumes | `Test data or open volume...` |
+| test files only | `Test data...` |
+| open volumes only | `Open volume...` |
+| a hosted MODEL | `Model on the server...` |
+| nothing | the neutral words, unchanged |
+
+A model row is its own case because those entries are never fetched — they ARE
+the value, and the weights stay on the server — so "test data" would be wrong
+twice over. And naming a source the list does not have would be worse than
+saying nothing: a user opens it, finds no test data, and stops trusting it.
+
+The collapsed box stays narrow on purpose (`minimumContentsLength`), so the
+prompt is the first thing elided; it is repeated as the box's tooltip, refreshed
+on every rebuild.
+
+### The caption: which file, and what kind of file
+
+The row shows a path, and a path is the wrong thing to show. A downloaded test
+file lands on
+`/tmp/Slicer-luciacev/ADTRemoteTestFiles2026-09-09_09+32+09.118/MG_test_scan.nii.gz`,
+which the field renders as `:TestFiles2026-09-09_09+32+09.118/MG_test_scan.nii.gz`
+— the NAME is the first thing elided, the kind is never visible at all, and the
+dropdown has meanwhile gone back to its prompt because picking a hosted file is
+an action rather than a state. Nothing on screen said what was loaded.
+
+So `ServerFileInput` is a column now: the controls on one line, and under them a
+muted caption that wraps rather than elides.
+
+    MG_test_scan.nii.gz - NIfTI volume, 94 MB - test data, fetched to a temporary folder
+
+Three sources, three sentences, because "what is in this field" has three
+different answers: a local path is described by `describe_file`, an open volume
+says so by name (nothing is on disk for it, and "no file chosen" would be a lie
+about a satisfied argument), and a hosted MODEL names itself.
+
+- **`FILE_KINDS` maps an extension to the words a clinician uses** — "NIfTI
+  volume", "VTK surface", "Slicer markups". Longest suffix first, so `.nii.gz`
+  never matches as `.gz`. A name that matches nothing gets **no** kind: a bare
+  name beats a confident guess at what a file holds.
+- **"test data, fetched to a temporary folder" is not decoration.** That file
+  sits in a session directory swept on exit; a user who takes it for their own
+  copy will look for it next week and not find it. Decided by NAME against the
+  entries this row offered, not by directory — the panel owns where a download
+  lands and this widget does not.
+- **The full path becomes the field's tooltip**, so where it sits stays
+  reachable without costing a second line.
+
 ### `choice` and `multichoice`
 
 Both carry a `choices` dict — `{option_name: initial_state}`, `null` on every

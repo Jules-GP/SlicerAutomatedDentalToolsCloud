@@ -133,6 +133,76 @@ def hosted_entry_label(entry: dict) -> str:
     details = [detail for detail in (entry.get("kind"), human_size(entry.get("size"))) if detail]
     return f"{name}  ({', '.join(details)})" if details else name
 
+# What a file IS, in the words a clinician uses, keyed by extension. The panel
+# shows a path; a path says where a file sits, not what it holds, and ".vtk" or
+# ".nrrd" at the tail of an elided temp directory says neither. Longest suffix
+# first, so `.nii.gz` never matches as `.gz`.
+FILE_KINDS = (
+    (".nii.gz", "NIfTI volume"), (".nii", "NIfTI volume"),
+    (".nrrd", "NRRD volume"), (".nhdr", "NRRD volume"),
+    (".mha", "MetaImage volume"), (".mhd", "MetaImage volume"),
+    (".gipl.gz", "GIPL volume"), (".gipl", "GIPL volume"),
+    (".dcm", "DICOM slice"),
+    (".vtk", "VTK surface"), (".vtp", "VTK surface"),
+    (".stl", "STL surface"), (".obj", "OBJ surface"), (".ply", "PLY surface"),
+    (".mrk.json", "Slicer markups"), (".fcsv", "Slicer markups"),
+    (".tfm", "transform"), (".h5", "transform"), (".mat", "transform"),
+    (".csv", "CSV table"), (".tsv", "TSV table"),
+    (".xlsx", "Excel table"), (".xls", "Excel table"), (".ods", "table"),
+    (".json", "JSON file"), (".txt", "text file"), (".md", "text file"),
+    (".zip", "ZIP archive"),
+)
+
+
+def file_kind(path: str) -> str:
+    """"NIfTI volume", "VTK surface", "folder" -- or "" for a name that says
+    nothing recognisable, which is better than guessing at one."""
+    if not path:
+        return ""
+    if os.path.isdir(path):
+        return "folder"
+    lowered = os.path.basename(path).lower()
+    for suffix, kind in FILE_KINDS:
+        if lowered.endswith(suffix):
+            return kind
+    return ""
+
+
+def _size_on_disk(path: str) -> int:
+    """Bytes, walking a directory when it is one. Metadata only -- nothing is
+    read -- so a 339 MB cohort costs a stat per file and no I/O."""
+    try:
+        if os.path.isfile(path):
+            return os.path.getsize(path)
+        total = 0
+        for directory, _subdirs, names in os.walk(path):
+            for name in names:
+                try:
+                    total += os.path.getsize(os.path.join(directory, name))
+                except OSError:
+                    continue
+        return total
+    except OSError:
+        return 0
+
+
+def describe_file(path: str) -> str:
+    """One line naming what is in an input: "MG_test_scan.nii.gz - NIfTI volume, 94 MB".
+
+    The row itself cannot say this. A downloaded test file lands on a path like
+    `/tmp/Slicer-luciacev/ADTRemoteTestFiles2026-09-09_09+26+53.117/MG_test_scan.nii.gz`,
+    which a path field renders as `:TestFiles2026-09-09_09+26+53.117/MG_test_...`
+    -- the name is the first thing to be cut, and the kind is never visible at
+    all. This is written under the row, wraps rather than elides, and so cannot
+    lose the two things a user needs: which file, and what kind of file.
+    """
+    if not path:
+        return ""
+    name = os.path.basename(path.rstrip(os.sep)) or path
+    details = [detail for detail in (file_kind(path), human_size(_size_on_disk(path))) if detail]
+    return "{} - {}".format(name, ", ".join(details)) if details else name
+
+
 # Extensions Slicer holds as a scalar volume in the scene. A file argument
 # accepting one of these can equally be satisfied by a volume the user already
 # has open, exported at upload time (base_widget._prepareOneInputFile).
@@ -667,12 +737,24 @@ class ServerFileInput:
     chosen entry to the first one in the list.
     """
 
-    # First entry, and the state that means "nothing picked FROM THIS LIST":
-    # a combo box cannot express an empty selection in a way a user reads as
-    # deliberate. It is deliberately the same words as the path field's own
-    # placeholder - one affordance, one prompt - and it is not a source. What
-    # says whether the argument has been given anything is the path field.
+    # First entry, and the state that means "nothing picked FROM THIS LIST": a
+    # combo box cannot express an empty selection in a way a user reads as
+    # deliberate.
+    #
+    # It used to be the path field's own placeholder, word for word, on the
+    # reasoning that two halves of one row should say one thing. Photographed,
+    # that reasoning does not survive: the panel shows "Select a file or a
+    # folder" twice, side by side, and the dropdown reads as a duplicate of the
+    # field rather than as the one place a tool's test data is reached from.
+    # Nobody opens a control that appears to repeat its neighbour.
+    #
+    # So the prompt now NAMES WHAT IS INSIDE, and this constant is only the
+    # fallback for a list with nothing in it. `_prompt` picks the words.
     CHOOSE_OPTION = PATH_PLACEHOLDER
+    PROMPT_HOSTED = "Test data..."
+    PROMPT_VOLUMES = "Open volume..."
+    PROMPT_BOTH = "Test data or open volume..."
+    PROMPT_MODEL = "Model on the server..."
 
     def __init__(self, local, hosted_downloads=True, on_hosted=None):
         self.local = local
@@ -686,8 +768,15 @@ class ServerFileInput:
         self.hosted_downloads = bool(hosted_downloads)
         self._on_hosted = on_hosted
 
+        # A column, not a row: the controls sit on one line and the caption
+        # under them. The caption is the only place that can say what is loaded
+        # without truncating it -- see `describe_file`.
         self.container = qt.QWidget()
-        row = qt.QHBoxLayout(self.container)
+        column = qt.QVBoxLayout(self.container)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+        controls = qt.QWidget()
+        row = qt.QHBoxLayout(controls)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(design.SPACING_XS)
 
@@ -704,13 +793,24 @@ class ServerFileInput:
         # its longest entry on every rebuild.
         self.combo.sizeAdjustPolicy = qt.QComboBox.AdjustToMinimumContentsLengthWithIcon
         self.combo.minimumContentsLength = 14
-        self.combo.setToolTip(PATH_PLACEHOLDER)
+        # Replaced on every rebuild, once the list knows what it holds.
+        self.combo.setToolTip(self.CHOOSE_OPTION)
         self.combo.addItems([self.CHOOSE_OPTION])
         row.addWidget(self.combo)
         row.addWidget(row_widget(local), 1)
+        column.addWidget(controls)
+
+        self.caption = design.hint_label("")
+        self.caption.setVisible(False)
+        column.addWidget(self.caption)
 
         self.combo.currentTextChanged.connect(self._onComboChoice)
         connect_changed(local, self._onLocalChoice)
+        # Its own connection, not a call from the two handlers: a path also
+        # arrives through `set_local_path` when a download lands, which is
+        # exactly the case the caption exists for.
+        connect_changed(local, self._describe)
+        self.combo.currentTextChanged.connect(self._describe)
 
     def setHostedCallback(self, callback) -> None:
         """What to do when the user picks a hosted test file: base_widget
@@ -743,9 +843,28 @@ class ServerFileInput:
         download is unpacked and whether it is loaded into the scene."""
         return list(self._hosted)
 
+    def _prompt(self) -> str:
+        """The first entry, naming what the list holds rather than repeating the
+        field beside it.
+
+        A model row is its own case: those entries are not fetched, they are the
+        value, so "Test data" would be wrong twice over.
+        """
+        if self._hosted and not self.hosted_downloads:
+            return self.PROMPT_MODEL
+        if self._hosted and self._volume_names:
+            return self.PROMPT_BOTH
+        if self._hosted:
+            return self.PROMPT_HOSTED
+        if self._volume_names:
+            return self.PROMPT_VOLUMES
+        # Nothing to offer: the list is inert, and saying so by naming a source
+        # it does not have would be worse than the neutral words.
+        return self.CHOOSE_OPTION
+
     def _entries(self) -> list:
         return (
-            [self.CHOOSE_OPTION]
+            [self._prompt()]
             + [hosted_entry_label(entry) for entry in self._hosted]
             + [OPEN_VOLUME_PREFIX + name for name in self._volume_names]
         )
@@ -763,6 +882,7 @@ class ServerFileInput:
             if previous in entries:
                 self.combo.setCurrentIndex(entries.index(previous))
             self._widenPopup(entries)
+            self.combo.setToolTip(entries[0])
         finally:
             self._syncing = False
 
@@ -854,6 +974,43 @@ class ServerFileInput:
         if kind == "hosted" and self.hosted_downloads and self._on_hosted is not None:
             self._on_hosted(name)
 
+    def _describe(self, *_args) -> None:
+        """Say what this input holds, under the row, whatever satisfied it.
+
+        Three sources, three sentences, because "what is in this field" has
+        three different answers and a path field can only ever show one of
+        them -- badly.
+        """
+        volume = self.volume_name()
+        model = self.server_name()
+        path = _local_path(self.local)
+        if volume:
+            text = "Open volume - {}".format(volume)
+        elif model:
+            text = "Model on the server - {}".format(model)
+        elif path:
+            text = describe_file(path)
+            # Where it came from, and it is not cosmetic: a file the panel
+            # fetched sits in a session directory that is swept on exit, and a
+            # user who mistakes it for their own copy will look for it later.
+            if self._is_fetched(path):
+                text += " - test data, fetched to a temporary folder"
+        else:
+            text = ""
+        self.caption.setText(text)
+        self.caption.setVisible(bool(text))
+        # The full path stays reachable without taking a line of its own.
+        set_tooltip(self.local, path)
+
+    def _is_fetched(self, path: str) -> bool:
+        """Whether this path is one of the hosted entries this row offered.
+
+        By NAME rather than by directory: the panel owns where a download
+        lands, this widget does not, and asking would couple the two.
+        """
+        name = os.path.basename(path.rstrip(os.sep))
+        return any(entry.get("name") == name for entry in self._hosted)
+
     def _onLocalChoice(self, *_args) -> None:
         if self._syncing or not _local_path(self.local):
             return
@@ -907,6 +1064,19 @@ def _set_local_path(widget, value: str) -> None:
         widget.pathEdit.setText(value)
     else:
         widget.currentPath = value
+
+
+def set_tooltip(widget, text: str) -> None:
+    """Put `text` on whichever picker kind `widget` is, and on nothing else.
+
+    The caption says which file; the tooltip says where it sits. A composite
+    row has no tooltip of its own, so it goes on the field the pointer is
+    actually over.
+    """
+    target = getattr(widget, "pathEdit", widget)
+    setter = getattr(target, "setToolTip", None)
+    if setter:
+        setter(text or "")
 
 
 def row_widget(field):
